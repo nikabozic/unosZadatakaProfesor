@@ -20,7 +20,7 @@ type BaseQuestion = {
 
 type GeneratedQuestion = BaseQuestion & {
   taskType: TaskType;
-  options?: number[];    // za multiple-choice
+  options?: number[]; // za multiple-choice
   correctIndex?: number; // index točnog u options
 };
 
@@ -469,7 +469,7 @@ export default function Page() {
             </p>
           </div>
 
-          {/* Formula rješenja – za slučaj da želiš odvojeno pisati */}
+          {/* Formula rješenja */}
           <div className="space-y-1">
             <label className="font-semibold text-black">Formula rješenja</label>
             <input
@@ -642,6 +642,12 @@ export default function Page() {
                           {checkResults[i] === "empty" && score !== null && (
                             <p className="text-yellow-700 text-sm mt-1">
                               Nema odgovora
+                            </p>
+                          )}
+
+                          {showSolutions && typeof q.answer === "number" && (
+                            <p className="text-green-700 text-sm mt-1">
+                              Točno rješenje: <b>{q.answer}</b>
                             </p>
                           )}
                         </>
