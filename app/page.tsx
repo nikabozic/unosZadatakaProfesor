@@ -10,15 +10,6 @@ const TASK_TYPE_LABELS: Record<TaskType, string> = {
   "short-answer": "Zadatak kratkog odgovora",
 };
 
-// ----- META PODACI: tekstualne zamjene -----
-const TEXT_POOLS: Record<string, string[]> = {
-  djecak: ["Ivan", "Marko", "Pero"],
-  djevojcica: ["Ana", "Iva", "Mara"],
-  voce1: ["jabuka", "krušaka", "banana"],
-  voce2: ["naranči", "limuna", "grejpova"],
-  pribaviti: ["kupio", "nabavio", "prikupio"],
-};
-
 type BaseQuestion = {
   id: number;
   text: string;
@@ -39,6 +30,7 @@ type SavedTask = {
   template: string; // meta-tekst + !R=...
 };
 
+// helperi
 function randomChoice<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -66,6 +58,69 @@ function generateMcqOptions(correct: number): number[] {
     if (!opts.includes(extra)) opts.push(extra);
   }
   return opts.slice(0, 4);
+}
+
+// PARSER DEFINICIJA TEKSTUALNIH VARIJABLI
+// %djecak=[Ivan, Marko, Pero]
+function parseTextPools(defs: string): Record<string, string[]> {
+  const pools: Record<string, string[]> = {};
+  const lines = defs.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || !line.startsWith("%")) continue;
+
+    const eqIndex = line.indexOf("=");
+    if (eqIndex === -1) continue;
+
+    const namePart = line.slice(0, eqIndex).trim(); // npr. "%djecak"
+    const valuesPart = line.slice(eqIndex + 1).trim(); // npr. "[Ivan, Marko, Pero]"
+
+    const name = namePart.replace(/^%/, "").trim(); // "djecak"
+    if (!name) continue;
+
+    let inner = valuesPart;
+    const m = valuesPart.match(/^\[(.*)\]$/);
+    if (m) inner = m[1];
+
+    const values = inner
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+
+    if (values.length > 0) {
+      pools[name] = values;
+    }
+  }
+
+  return pools;
+}
+
+// PARSER DEFINICIJA BROJČANIH VARIJABLI
+// #BROJ1={1;9;1}
+type NumericDef = { min: number; max: number; step: number };
+
+function parseNumericDefs(defs: string): Record<string, NumericDef> {
+  const nums: Record<string, NumericDef> = {};
+  const lines = defs.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || !line.startsWith("#")) continue;
+
+    const m = line.match(/^#([a-zA-Z0-9_]+)=\{(\d+);(\d+);(\d+)\}$/);
+    if (!m) continue;
+
+    const name = m[1];
+    const min = parseInt(m[2], 10);
+    const max = parseInt(m[3], 10);
+    const step = parseInt(m[4], 10);
+    if (step <= 0 || max < min) continue;
+
+    nums[name] = { min, max, step };
+  }
+
+  return nums;
 }
 
 // PARSER IZRAZA IZA !R=
@@ -99,35 +154,44 @@ function computeAnswerFromTemplate(
   return undefined;
 }
 
-// GENERATOR JEDNOG ZADATKA (bez tipa)
-function generateFromTemplate(template: string): BaseQuestion {
+// GENERATOR JEDNOG ZADATKA (prima pools izvana)
+function generateFromTemplate(
+  template: string,
+  textPools: Record<string, string[]>,
+  numericDefs: Record<string, NumericDef>
+): BaseQuestion {
   let work = template;
   const variables: Record<string, string | number> = {};
 
-  // tekstualni placeholdere: [%ime]
+  // tekstualni placeholdere: [%djecak]
   work = work.replace(/\[%([a-zA-Z0-9_]+)\]/g, (_, name) => {
-    const pool = TEXT_POOLS[name] || [name];
+    const pool = textPools[name] || [name];
     const value = randomChoice(pool);
     variables[name] = value;
     return value;
   });
 
-  // brojčani placeholderi: #X={2;9;1}
-  work = work.replace(
-    /#([a-zA-Z0-9_]+)=\{(\d+);(\d+);(\d+)\}/g,
-    (_, name, minStr, maxStr, stepStr) => {
-      const min = parseInt(minStr, 10);
-      const max = parseInt(maxStr, 10);
-      const step = parseInt(stepStr, 10);
-
-      const count = Math.floor((max - min) / step) + 1;
-      const idx = Math.floor(Math.random() * count);
-      const value = min + idx * step;
-
-      variables[name] = value;
-      return String(value);
+  // brojčani placeholdere: #BROJ1, #BROJ2 (raspon definiran dolje)
+  work = work.replace(/#([a-zA-Z0-9_]+)/g, (_, name) => {
+    // ako već imamo vrijednost (ponovna pojava u tekstu)
+    if (typeof variables[name] === "number") {
+      return String(variables[name]);
     }
-  );
+
+    const def = numericDefs[name];
+    if (!def) {
+      // nema definicije -> ostavi kako jest
+      return `#${name}`;
+    }
+
+    const { min, max, step } = def;
+    const count = Math.floor((max - min) / step) + 1;
+    const idx = Math.floor(Math.random() * count);
+    const value = min + idx * step;
+
+    variables[name] = value;
+    return String(value);
+  });
 
   const answer = computeAnswerFromTemplate(work, variables);
   const displayText = work.replace(/!R=.*$/, "").trim();
@@ -142,12 +206,28 @@ function generateFromTemplate(template: string): BaseQuestion {
 }
 
 export default function Page() {
+  // meta-zadatak – u tekstu samo #BROJ1 i #BROJ2
   const [template, setTemplate] = useState<string>(
-    "[%djecak] je [%pribaviti] #X={2;9;1} [%voce1], a [%djevojcica] #Y={2;9;1} [%voce2]. Koliko je to voća ukupno?"
+    "[%djecak] je [%pribaviti] #BROJ1 [%voce1], a [%djevojcica] #BROJ2 [%voce2]. Koliko je to voća ukupno? !R=BROJ1+BROJ2"
   );
-  const [solutionFormula, setSolutionFormula] = useState<string>("X+Y");
+  const [solutionFormula, setSolutionFormula] = useState<string>("BROJ1+BROJ2");
 
-  // tip ZADATKA na ISPITU (za sve zadatke)
+  // definicije tekstualnih varijabli
+  const [variableDefs, setVariableDefs] = useState<string>(
+`%djecak=[Ivan, Marko, Pero]
+%djevojcica=[Ana, Iva, Mara]
+%voce1=[jabuka, krušaka, banana]
+%voce2=[naranči, limuna, grejpova]
+%pribaviti=[kupio, nabavio, prikupio]`
+  );
+
+  // definicije brojčanih varijabli (rasponi)
+  const [numericDefs, setNumericDefs] = useState<string>(
+`#BROJ1={1;9;1}
+#BROJ2={1;9;1}`
+  );
+
+  // tip zadataka za ispit: kratki odgovor ili A–D
   const [examMode, setExamMode] = useState<TaskType>("short-answer");
 
   const [savedTasks, setSavedTasks] = useState<SavedTask[]>([]);
@@ -164,22 +244,25 @@ export default function Page() {
   const handleSaveTask = () => {
     const text = template.trim();
     const formula = solutionFormula.trim();
+
     if (!text || !formula) return;
 
-    const fullTemplate = `${text} !R=${formula}`;
-    const newTask: SavedTask = { template: fullTemplate };
+    const fullTemplate = text.includes("!R=") ? text : `${text} !R=${formula}`;
 
+    const newTask: SavedTask = { template: fullTemplate };
     setSavedTasks((prev) => [newTask, ...prev]);
     setTaskCounts((prev) => [0, ...prev]);
   };
 
   const handleGenerateExam = () => {
+    const textPools = parseTextPools(variableDefs);
+    const numDefs = parseNumericDefs(numericDefs);
     const all: GeneratedQuestion[] = [];
 
     savedTasks.forEach((saved, i) => {
       const count = taskCounts[i] || 0;
       for (let j = 0; j < count; j++) {
-        const base = generateFromTemplate(saved.template);
+        const base = generateFromTemplate(saved.template, textPools, numDefs);
 
         if (examMode === "multiple-choice" && typeof base.answer === "number") {
           const opts = shuffle(generateMcqOptions(base.answer));
@@ -211,7 +294,6 @@ export default function Page() {
     let autoCount = 0;
 
     generatedQuestions.forEach((q, i) => {
-      // kratki odgovor
       if (q.taskType === "short-answer") {
         autoCount++;
         const ans = studentAnswers[i]?.trim() ?? "";
@@ -229,7 +311,6 @@ export default function Page() {
         return;
       }
 
-      // multiple-choice
       if (q.taskType === "multiple-choice" && q.options && q.correctIndex !== undefined) {
         autoCount++;
         const ans = studentAnswers[i]?.trim() ?? "";
@@ -269,24 +350,33 @@ export default function Page() {
             Editor matematičkih zadataka
           </h1>
           <p className="text-black">
-            Upiši meta-zadatak, formulu rješenja, spremi predložak i kasnije
-            odaberi želiš li ispit s kratkim odgovorom ili zaokruživanjem A–D.
+            Primjer meta-zadatka bez raspona u tekstu:
+          </p>
+          <p className="text-sm font-mono text-black">
+            [%djecak] je [%pribaviti] #BROJ1 [%voce1], a [%djevojcica] #BROJ2
+            [%voce2]. Koliko je to voća ukupno? !R=BROJ1+BROJ2
+          </p>
+          <p className="text-sm text-black">
+            Rasponi za BROJ1 i BROJ2 definiraju se dolje, npr.{" "}
+            <code>#BROJ1=&#123;1;9;1&#125;</code> znači od 1 do 9, korak 1.
           </p>
         </header>
 
-        {/* --- EDITOR --- */}
+        {/* --- EDITOR META-ZADATKA + VARIJABLE + FORMULA --- */}
         <section className="space-y-4">
+          {/* META-ZADATAK */}
           <div className="space-y-1">
             <label className="font-semibold text-black">Tekst meta-zadatka</label>
             <textarea
               ref={textareaRef}
-              className="w-full h-40 border rounded-lg p-3 font-mono text-black bg-white"
+              className="w-full h-32 border rounded-lg p-3 font-mono text-black bg-white"
               value={template}
               onChange={(e) => setTemplate(e.target.value)}
-              placeholder="npr. [%djecak] je [%pribaviti] #X={2;9;1} [%voce1], a [%djevojcica] #Y={2;9;1} [%voce2]. Koliko je to voća ukupno?"
+              placeholder="[%djecak] je [%pribaviti] #BROJ1 [%voce1], a [%djevojcica] #BROJ2 [%voce2]. Koliko je to voća ukupno? !R=BROJ1+BROJ2"
             />
           </div>
 
+          {/* Gumbi za ubacivanje placeholdere u meta-zadatak */}
           <div className="flex flex-wrap gap-2">
             {["[%djecak]", "[%djevojcica]", "[%voce1]", "[%voce2]", "[%pribaviti]"].map(
               (t) => (
@@ -313,7 +403,7 @@ export default function Page() {
               )
             )}
 
-            {["#X={2;9;1}", "#Y={2;9;1}", "#JEDNOZNAM={1;9;1}"].map((t) => (
+            {["#BROJ1", "#BROJ2"].map((t) => (
               <button
                 key={t}
                 onClick={() => {
@@ -337,6 +427,49 @@ export default function Page() {
             ))}
           </div>
 
+          {/* Definicije tekstualnih varijabli */}
+          <div className="space-y-1">
+            <label className="font-semibold text-black">
+              Definicije tekstualnih varijabli
+            </label>
+            <textarea
+              className="w-full h-32 border rounded-lg p-3 font-mono text-black bg-white"
+              value={variableDefs}
+              onChange={(e) => setVariableDefs(e.target.value)}
+              placeholder="%djecak=[Ivan, Marko, Pero]
+%djevojcica=[Ana, Iva, Mara]
+%voce1=[jabuka, krušaka, banana]
+%voce2=[naranči, limuna, grejpova]
+%pribaviti=[kupio, nabavio, prikupio]"
+            />
+            <p className="text-sm text-black">
+              Svaka linija: <code>%ime=[vrijednost1, vrijednost2, ...]</code>{" "}
+              (bez navodnika). Ta imena koristiš u tekstu zadatka kao{" "}
+              <code>[%ime]</code>.
+            </p>
+          </div>
+
+          {/* Definicije brojčanih varijabli */}
+          <div className="space-y-1">
+            <label className="font-semibold text-black">
+              Definicije brojčanih varijabli
+            </label>
+            <textarea
+              className="w-full h-24 border rounded-lg p-3 font-mono text-black bg-white"
+              value={numericDefs}
+              onChange={(e) => setNumericDefs(e.target.value)}
+              placeholder="#BROJ1={1;9;1}
+#BROJ2={1;9;1}"
+            />
+            <p className="text-sm text-black">
+              Svaka linija:{" "}
+              <code>#IME=&#123;min;max;korak&#125;</code>. U tekstu koristiš{" "}
+              <code>#IME</code>, a u formuli <code>IME</code> (bez #).
+              Primjer: <code>#BROJ1=&#123;1;9;1&#125;</code> → brojevi od 1 do 9.
+            </p>
+          </div>
+
+          {/* Formula rješenja – za slučaj da želiš odvojeno pisati */}
           <div className="space-y-1">
             <label className="font-semibold text-black">Formula rješenja</label>
             <input
@@ -344,19 +477,25 @@ export default function Page() {
               value={solutionFormula}
               onChange={(e) => setSolutionFormula(e.target.value)}
               className="w-full border rounded-lg p-2 text-black bg-white font-mono"
-              placeholder="npr. X+Y, X-Y, 2*(A+B)"
+              placeholder="npr. BROJ1+BROJ2"
             />
+            <p className="text-sm text-black">
+              Ovdje koristiš ista imena brojčanih varijabli kao u tekstu (npr.{" "}
+              <code>BROJ1</code>, <code>BROJ2</code>), bez <code>#</code> i bez{" "}
+              <code>!R=</code>. Ako ih nema u tekstu, bit će dodana kao{" "}
+              <code>!R=...</code> pri spremanju.
+            </p>
           </div>
 
           <button
             onClick={handleSaveTask}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg"
           >
-            Spremi zadatak
+            Spremi meta-zadatak
           </button>
         </section>
 
-        {/* --- SPREMLJENI --- */}
+        {/* --- SPREMLJENI META-ZADACI --- */}
         <section className="space-y-3">
           <h2 className="text-xl font-semibold text-black">Spremljeni meta-zadaci</h2>
 
@@ -378,12 +517,14 @@ export default function Page() {
                       {textPart?.trim() ?? ""}
                     </span>
                   </div>
-                  <div className="text-xs">
-                    <span className="font-semibold">Formula:</span>{" "}
-                    <span className="font-mono">
-                      {(formulaPart ?? "").trim()}
-                    </span>
-                  </div>
+                  {formulaPart && (
+                    <div className="text-xs">
+                      <span className="font-semibold">Formula:</span>{" "}
+                      <span className="font-mono">
+                        {formulaPart.trim()}
+                      </span>
+                    </div>
+                  )}
 
                   <div className="mt-2 flex flex-wrap gap-3 items-center text-black text-sm">
                     <div className="flex items-center gap-2">
